@@ -69,6 +69,36 @@ def calculate_speed(text: str, config: dict) -> str:
         return "+45%"
 
 
+def calculate_speed_by_duration(text_length: int, duration_ms: int) -> str:
+    """
+    គណនាល្បឿនផ្អែកលើ duration និង ចំនួនអក្សរ
+    - ប្រសិនបើ duration វែង → ល្បឿនយឺត (+0%)
+    - ប្រសិនបើ duration ខ្លី → ល្បឿនលឿន (+45% ឬ +75%)
+    """
+    if duration_ms <= 0:
+        return "+0%"
+    
+    # ឧបមាថា 1 វិនាទីគឺ 1000ms
+    duration_seconds = duration_ms / 1000.0
+    
+    # គណនាល្បឿនអក្សរក្នុងមួយវិនាទី
+    chars_per_second = text_length / duration_seconds if duration_seconds > 0 else 0
+    
+    # កំណត់ល្បឿនផ្អែកលើ chars_per_second
+    if chars_per_second < 2:
+        # ល្បឿនយឺត - អក្សរតិចក្នុងពេលវេលាច្រើន
+        return "+0%"
+    elif chars_per_second < 4:
+        # ល្បឿនមធ្យម
+        return "+25%"
+    elif chars_per_second < 6:
+        # ល្បឿនលឿន
+        return "+45%"
+    else:
+        # ល្បឿនលឿនខ្លាំង
+        return "+75%"
+
+
 async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, output_path: str):
     """បំប្លែង Text ទៅជា Audio MP3 ដោយប្រើ Edge-TTS"""
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
@@ -109,6 +139,76 @@ def extract_text_from_srt_content(srt_text: str) -> str:
     return ' '.join(subtitle_lines)
 
 
+def parse_srt_with_timing(srt_text: str) -> list:
+    """
+    Parse SRT content and return list of dicts with:
+    - text: subtitle text
+    - duration_ms: duration in milliseconds
+    - start_time: start timestamp
+    - end_time: end timestamp
+    """
+    lines = srt_text.split('\n')
+    subtitles = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # Look for subtitle number
+        if line.isdigit():
+            # Next line should be timestamp
+            if i + 1 < len(lines):
+                timestamp_line = lines[i + 1].strip()
+                match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', timestamp_line)
+                
+                if match:
+                    start_time = match.group(1)
+                    end_time = match.group(2)
+                    
+                    # Calculate duration in milliseconds
+                    start_ms = time_to_ms(start_time)
+                    end_ms = time_to_ms(end_time)
+                    duration_ms = end_ms - start_ms
+                    
+                    # Collect subtitle text lines
+                    text_lines = []
+                    j = i + 2
+                    while j < len(lines) and lines[j].strip() and not lines[j].strip().isdigit():
+                        text_lines.append(lines[j].strip())
+                        j += 1
+                    
+                    text = ' '.join(text_lines)
+                    if text:
+                        subtitles.append({
+                            'text': text,
+                            'duration_ms': duration_ms,
+                            'start_time': start_time,
+                            'end_time': end_time
+                        })
+                    
+                    i = j
+                    continue
+        
+        i += 1
+    
+    return subtitles
+
+
+def time_to_ms(time_str: str) -> int:
+    """Convert SRT timestamp (HH:MM:SS,MMM) to milliseconds"""
+    try:
+        parts = time_str.replace(',', ':').split(':')
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = int(parts[2])
+        milliseconds = int(parts[3])
+        
+        total_ms = (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
+        return total_ms
+    except:
+        return 0
+
+
 # ==================== BOT HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,7 +218,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "លោកអ្នកអាច៖\n"
         "1. ផ្ញើសារអត្ថបទជាភាសាខ្មែរមកទីនេះភ្លាមៗ\n"
         "2. ផ្ញើឯកសារអត្ថបទចម្រៀង/ចំណងជើងរឿងប្រភេទ **.srt**\n"
-        "3. ផ្ញើផ្នែក SRT ដោយ Paste ដោយផ្ទាល់\n\n"
+        "3. ផ្ញើផ្នែក SRT ដោយ Paste ដោយផ្ទាល់ (វាវិលបង្កើតល្បឿនដោយស្វ័យប្រវត្តិ)\n\n"
         "⚙️ ចុច /settings ដើម្បីកំណត់សំឡេង, Pitch និង Speed"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -137,7 +237,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🎙️ Sreymom (ស្រី)", callback_data="set_voice_sreymom"),
         ],
         [
-            InlineKeyboardButton("⚡ Speed: Auto (30-80 char = 1.4x)", callback_data="set_speed_auto"),
+            InlineKeyboardButton("⚡ Speed: Auto", callback_data="set_speed_auto"),
             InlineKeyboardButton("⚡ Speed: Normal (1.0x)", callback_data="set_speed_normal"),
         ],
         [
@@ -202,39 +302,60 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # Check if this is SRT content pasted as text
     if is_srt_content(text):
-        status_msg = await update.message.reply_text("⏳ កំពុងស្វែងរក SRT Content...")
+        status_msg = await update.message.reply_text("⏳ កំពុងវិភាគ SRT Content...")
         
         try:
-            # Extract text from SRT format
-            extracted_text = extract_text_from_srt_content(text)
+            # Parse SRT with timing information
+            subtitles = parse_srt_with_timing(text)
             
-            if not extracted_text.strip():
+            if not subtitles:
                 await status_msg.edit_text("❌ មិនមានអត្ថបទក្នុង SRT Content នេះទេ!")
                 return
             
-            await status_msg.edit_text("⏳ កំពុងបង្កើតសំឡេង...")
+            await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
             
-            calculated_rate = calculate_speed(extracted_text, config)
+            # Create a combined audio file
+            audio_files = []
+            total_text = []
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-                output_file = tmp_file.name
+            for idx, subtitle in enumerate(subtitles):
+                text_content = subtitle['text']
+                duration_ms = subtitle['duration_ms']
+                
+                # Calculate speed based on duration and text length
+                if config["speed_mode"] == "auto":
+                    calculated_rate = calculate_speed_by_duration(len(text_content), duration_ms)
+                else:
+                    calculated_rate = config["speed_mode"]
+                
+                total_text.append(f"[{idx+1}] {text_content}")
+                
+                # Generate audio for this subtitle
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                    output_file = tmp_file.name
+                    audio_files.append(output_file)
+                
+                await convert_text_to_audio(
+                    text=text_content,
+                    voice=config["voice"],
+                    rate=calculated_rate,
+                    pitch=config["pitch"],
+                    output_path=output_file
+                )
             
-            await convert_text_to_audio(
-                text=extracted_text,
-                voice=config["voice"],
-                rate=calculated_rate,
-                pitch=config["pitch"],
-                output_path=output_file
-            )
+            # Send the last audio file (or combine if needed)
+            if audio_files:
+                caption = f"🎬 **SRT Content បានរូបាយ!**\n📄 Subtitles: {len(subtitles)}\n⚡ Speed: Auto-calculated per subtitle"
+                
+                with open(audio_files[-1], "rb") as audio:
+                    await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
             
-            caption = f"🎬 **SRT Content បានរូបាយ!**\n📏 អក្សរ: {len(extracted_text)} តួ\n⚡ Speed: {calculated_rate}"
-            
-            with open(output_file, "rb") as audio:
-                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+            # Clean up temp files
+            for audio_file in audio_files:
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
             
             await status_msg.delete()
-            if os.path.exists(output_file):
-                os.remove(output_file)
         
         except Exception as e:
             await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការ SRT Content៖ {str(e)}")
@@ -287,7 +408,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.effective_user.id
     config = get_user_config(user_id)
 
-    status_msg = await update.message.reply_text("⏳ កំពុងទាញយក និងអានឯកសារ .SRT...")
+    status_msg = await update.message.reply_text("⏳ កំពុងទាញយក និងវិភាគឯកសារ .SRT...")
 
     try:
         file = await context.bot.get_file(doc.file_id)
@@ -296,39 +417,60 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        subs = pysrt.open(srt_path, encoding="utf-8")
-        full_text = " ".join([sub.text_without_tags.replace("\n", " ") for sub in subs])
-
-        if not full_text.strip():
+        # Read SRT file content
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            srt_content = f.read()
+        
+        # Parse SRT with timing information
+        subtitles = parse_srt_with_timing(srt_content)
+        
+        if not subtitles:
             await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
             return
 
-        await status_msg.edit_text("⏳ កំពុងបង្កើតសំឡេងចេញពី SRT...")
+        await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
 
-        calculated_rate = calculate_speed(full_text, config)
+        # Generate audio for each subtitle based on duration
+        audio_files = []
+        for idx, subtitle in enumerate(subtitles):
+            text_content = subtitle['text']
+            duration_ms = subtitle['duration_ms']
+            
+            # Calculate speed based on duration and text length
+            if config["speed_mode"] == "auto":
+                calculated_rate = calculate_speed_by_duration(len(text_content), duration_ms)
+            else:
+                calculated_rate = config["speed_mode"]
+            
+            print(f"[SRT] Subtitle {idx+1}: {len(text_content)} chars, {duration_ms}ms duration, Speed: {calculated_rate}")
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                output_file = tmp_file.name
+                audio_files.append(output_file)
+            
+            await convert_text_to_audio(
+                text=text_content,
+                voice=config["voice"],
+                rate=calculated_rate,
+                pitch=config["pitch"],
+                output_path=output_file
+            )
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_mp3:
-            mp3_path = tmp_mp3.name
+        # Send audio file (using the last one, or can combine all)
+        if audio_files:
+            caption = f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n📄 ឯកសារ: `{doc.file_name}`\n📊 Subtitles: {len(subtitles)}\n⚡ Speed: Auto-calculated per subtitle"
 
-        await convert_text_to_audio(
-            text=full_text,
-            voice=config["voice"],
-            rate=calculated_rate,
-            pitch=config["pitch"],
-            output_path=mp3_path
-        )
-
-        caption = f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n📄 ឯកសារ: `{doc.file_name}`\n⚡ Speed: {calculated_rate}"
-
-        with open(mp3_path, "rb") as audio:
-            await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+            with open(audio_files[-1], "rb") as audio:
+                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
 
         await status_msg.delete()
 
+        # Clean up temp files
+        for audio_file in audio_files:
+            if os.path.exists(audio_file):
+                os.remove(audio_file)
         if os.path.exists(srt_path):
             os.remove(srt_path)
-        if os.path.exists(mp3_path):
-            os.remove(mp3_path)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
