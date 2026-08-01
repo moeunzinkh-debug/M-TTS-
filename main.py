@@ -97,31 +97,57 @@ async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, ou
     await communicate.save(output_path)
 
 
-def merge_audio_files(audio_file_list: list, output_path: str) -> bool:
+def srt_time_to_ms(time_obj) -> int:
+    """បំប្លែង pysrt SubtitleTime ទៅជា Milliseconds"""
+    return (time_obj.hours * 3600 + time_obj.minutes * 60 + time_obj.seconds) * 1000 + time_obj.milliseconds
+
+
+def build_timeline_audio(subtitles_data: list, output_path: str) -> bool:
     """
-    រួមបញ្ចូលគ្នា (Merge) MP3 ឯកសារច្រើនជាឯកសារមួយ
-    audio_file_list: 리ストចូលក្នុង MP3 files
-    output_path: ផ្លូវលទ្ធផល
+    បង្កើត Audio រួមមួយដែលតម្រឹមតាម Timeline ពិតប្រាកដនៃ SRT (រួមទាំង Silence/Gaps)
+    subtitles_data: list នៃ dict {'file': path, 'start_ms': int, 'end_ms': int}
     """
     try:
-        if not audio_file_list:
+        if not subtitles_data:
             return False
         
-        # ផ្ទុកឯកសារ MP3 ដំបូង
-        combined = AudioSegment.from_mp3(audio_file_list[0])
-        
-        # ដាច់ सទៀត MP3 ឯកសារដទៀត
-        for audio_file in audio_file_list[1:]:
-            sound = AudioSegment.from_mp3(audio_file)
-            combined += sound
-        
-        # រក្សាទុកឯកសារលទ្ធផល
-        combined.export(output_path, format="mp3", bitrate="192k")
-        print(f"[MERGE] ឯកសារបានរួមបញ្ចូលគ្នាដោយជោគជ័យ: {output_path}")
+        # បង្កើត Audio ទទេ។ ដើមដំបូងឡើយគឺ 0ms
+        final_audio = AudioSegment.silent(duration=0)
+        current_timeline_ms = 0
+
+        for item in subtitles_data:
+            audio_path = item['file']
+            start_ms = item['start_ms']
+            end_ms = item['end_ms']
+            slot_duration = end_ms - start_ms
+
+            if not os.path.exists(audio_path):
+                continue
+
+            # ១. ប្រសិនបើ Timeline បច្ចុប្បន្នទាន់ដល់ Start Time នៃ Subtitle បន្ទាប់ ត្រូវបន្ថែម Silence Gap
+            if start_ms > current_timeline_ms:
+                gap_duration = start_ms - current_timeline_ms
+                final_audio += AudioSegment.silent(duration=gap_duration)
+                current_timeline_ms = start_ms
+
+            # ២. ផ្ទុកឯកសារ Audio Segment នៃ Subtitle នោះ
+            sub_audio = AudioSegment.from_mp3(audio_path)
+            
+            # ប្រសិនបើ Audio វែងជាង Slot duration ដែលមាន ត្រូវ Trim ឬ កាត់ ដើម្បីកុំឱ្យ Overlap
+            if len(sub_audio) > slot_duration and slot_duration > 0:
+                sub_audio = sub_audio[:slot_duration]
+
+            # ៣. បន្ថែម Audio ទៅក្នុង Final Audio Timeline
+            final_audio += sub_audio
+            current_timeline_ms += len(sub_audio)
+
+        # រក្សាទុកឯកសារលទ្ធផល final output
+        final_audio.export(output_path, format="mp3", bitrate="192k")
+        print(f"[TIMELINE] បង្កើត Audio តាម Timeline SRT រួចរាល់: {output_path}")
         return True
-    
+
     except Exception as e:
-        print(f"[ERROR] បញ្ហាក្នុងការរួមបញ្ចូលគ្នា: {str(e)}")
+        print(f"[ERROR] បញ្ហាក្នុងការបង្កើត Timeline Audio: {str(e)}")
         return False
 
 
@@ -141,72 +167,6 @@ def is_srt_content(text: str) -> bool:
     return bool(re.search(srt_pattern, text))
 
 
-def time_to_ms(time_str: str) -> int:
-    """Convert SRT timestamp (HH:MM:SS,MMM) to milliseconds"""
-    try:
-        parts = time_str.replace(',', ':').split(':')
-        hours = int(parts[0])
-        minutes = int(parts[1])
-        seconds = int(parts[2])
-        milliseconds = int(parts[3])
-        
-        total_ms = (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
-        return total_ms
-    except:
-        return 0
-
-
-def parse_srt_with_timing(srt_text: str) -> list:
-    """
-    Parse SRT content and return list of dicts with:
-    - text: subtitle text
-    - duration_ms: duration in milliseconds (end_time - start_time)
-    - start_time: start timestamp
-    - end_time: end timestamp
-    """
-    lines = srt_text.split('\n')
-    subtitles = []
-    i = 0
-    
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if line.isdigit():
-            if i + 1 < len(lines):
-                timestamp_line = lines[i + 1].strip()
-                match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', timestamp_line)
-                
-                if match:
-                    start_time = match.group(1)
-                    end_time = match.group(2)
-                    
-                    start_ms = time_to_ms(start_time)
-                    end_ms = time_to_ms(end_time)
-                    duration_ms = end_ms - start_ms
-                    
-                    text_lines = []
-                    j = i + 2
-                    while j < len(lines) and lines[j].strip() and not lines[j].strip().isdigit():
-                        text_lines.append(lines[j].strip())
-                        j += 1
-                    
-                    text = ' '.join(text_lines)
-                    if text:
-                        subtitles.append({
-                            'text': text,
-                            'duration_ms': duration_ms,
-                            'start_time': start_time,
-                            'end_time': end_time
-                        })
-                    
-                    i = j
-                    continue
-        
-        i += 1
-    
-    return subtitles
-
-
 # ==================== BOT HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,7 +183,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """បញ្ជា /settings សម្រាប់ជ្រើសរើផលស័ងសំឡេង និងការកំណត់"""
+    """បញ្ជា /settings សម្រាប់ជ្រើសរើសសំឡេង និងការកំណត់"""
     user_id = update.effective_user.id
     config = get_user_config(user_id)
 
@@ -289,6 +249,80 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def process_srt_subs(subs, update: Update, config: dict, status_msg):
+    """អនុវត្តការបង្កើត Audio តាម Timeline ចេញពី Subtitles Object"""
+    if not subs:
+        await status_msg.edit_text("❌ មិនមានអត្ថបទក្នុង SRT នេះទេ!")
+        return
+
+    await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subs)} subtitle(s)...")
+
+    subtitles_data = []
+    temp_files_to_clean = []
+
+    try:
+        for idx, sub in enumerate(subs):
+            text_content = sub.text_without_tags.replace("\n", " ").strip()
+            if not text_content:
+                continue
+
+            start_ms = srt_time_to_ms(sub.start)
+            end_ms = srt_time_to_ms(sub.end)
+            duration_ms = max(100, end_ms - start_ms)
+
+            if config["speed_mode"] == "auto":
+                calculated_rate = calculate_speed_for_duration(len(text_content), duration_ms)
+            else:
+                calculated_rate = config["speed_mode"]
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                output_file = tmp_file.name
+                temp_files_to_clean.append(output_file)
+
+            await convert_text_to_audio(
+                text=text_content,
+                voice=config["voice"],
+                rate=calculated_rate,
+                pitch=config["pitch"],
+                output_path=output_file
+            )
+
+            subtitles_data.append({
+                'file': output_file,
+                'start_ms': start_ms,
+                'end_ms': end_ms
+            })
+
+        await status_msg.edit_text("⏳ កំពុងផ្គុំ Audio តាម Timeline SRT...")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_merged:
+            merged_file = tmp_merged.name
+            temp_files_to_clean.append(merged_file)
+
+        if build_timeline_audio(subtitles_data, merged_file):
+            caption = f"🎬 **SRT Content បំប្លែងរួចរាល់!**\n📊 Subtitles: {len(subtitles_data)}\n⏱️ Synced accurately to timeline"
+
+            with open(merged_file, "rb") as audio:
+                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ មានបញ្ហាក្នុងការរួមបញ្ចូល Audio តាម Timeline!")
+
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការ SRT៖ {str(e)}")
+
+    finally:
+        # Clean up all temp generated audio files
+        for fpath in temp_files_to_clean:
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ដំណើរការអត្ថបទធម្មតាដែលផ្ញើចូល"""
     text = update.message.text
@@ -301,66 +335,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check if this is SRT content pasted as text
     if is_srt_content(text):
         status_msg = await update.message.reply_text("⏳ កំពុងវិភាគ SRT Content...")
-        
-        try:
-            subtitles = parse_srt_with_timing(text)
-            
-            if not subtitles:
-                await status_msg.edit_text("❌ មិនមានអត្ថបទក្នុង SRT Content នេះទេ!")
-                return
-            
-            await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
-            
-            audio_files = []
-            
-            for idx, subtitle in enumerate(subtitles):
-                text_content = subtitle['text']
-                duration_ms = subtitle['duration_ms']
-                
-                if config["speed_mode"] == "auto":
-                    calculated_rate = calculate_speed_for_duration(len(text_content), duration_ms)
-                else:
-                    calculated_rate = config["speed_mode"]
-                
-                print(f"[SRT] Subtitle {idx+1}: '{text_content[:50]}...' | Duration: {duration_ms}ms | Speed: {calculated_rate}")
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-                    output_file = tmp_file.name
-                    audio_files.append(output_file)
-                
-                await convert_text_to_audio(
-                    text=text_content,
-                    voice=config["voice"],
-                    rate=calculated_rate,
-                    pitch=config["pitch"],
-                    output_path=output_file
-                )
-            
-            # Merge all audio files
-            await status_msg.edit_text(f"⏳ កំពុងរួមបញ្ចូលគ្នា {len(audio_files)} ឯកសារអូឌីអូ...")
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_merged:
-                merged_file = tmp_merged.name
-            
-            if merge_audio_files(audio_files, merged_file):
-                caption = f"🎬 **SRT Content បានរូបាយ!**\n📊 Subtitles: {len(subtitles)}\n⏱️ Synced to timeline"
-                
-                with open(merged_file, "rb") as audio:
-                    await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
-                
-                await status_msg.delete()
-                
-                # Clean up temp files
-                for audio_file in audio_files + [merged_file]:
-                    if os.path.exists(audio_file):
-                        os.remove(audio_file)
-            else:
-                await status_msg.edit_text("❌ មានបញ្ហាក្នុងការរួមបញ្ចូលគ្នា!")
-        
-        except Exception as e:
-            print(f"[ERROR] {str(e)}")
-            await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការ SRT Content៖ {str(e)}")
-    
+        subs = pysrt.from_string(text)
+        await process_srt_subs(subs, update, config, status_msg)
     else:
         # Regular text message
         calculated_rate = calculate_speed(text, config)
@@ -395,13 +371,8 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     """ដំណើរការការ Upload ឯកសារ .srt"""
     doc = update.message.document
     
-    print(f"[DEBUG] Received file: {doc.file_name}")
-    
     if not is_srt_file(doc.file_name):
-        await update.message.reply_text(
-            "⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!\n"
-            "នឹងឯកសារដែលមាន `.srt` extension ប៉ុណ្ណោះ។"
-        )
+        await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!")
         return
 
     user_id = update.effective_user.id
@@ -416,63 +387,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            srt_content = f.read()
-        
-        subtitles = parse_srt_with_timing(srt_content)
-        
-        if not subtitles:
-            await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
-            return
+        subs = pysrt.open(srt_path, encoding="utf-8")
+        await process_srt_subs(subs, update, config, status_msg)
 
-        await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
-
-        audio_files = []
-        for idx, subtitle in enumerate(subtitles):
-            text_content = subtitle['text']
-            duration_ms = subtitle['duration_ms']
-            
-            if config["speed_mode"] == "auto":
-                calculated_rate = calculate_speed_for_duration(len(text_content), duration_ms)
-            else:
-                calculated_rate = config["speed_mode"]
-            
-            print(f"[SRT File] Subtitle {idx+1}: '{text_content[:50]}...' | Duration: {duration_ms}ms | Speed: {calculated_rate}")
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-                output_file = tmp_file.name
-                audio_files.append(output_file)
-            
-            await convert_text_to_audio(
-                text=text_content,
-                voice=config["voice"],
-                rate=calculated_rate,
-                pitch=config["pitch"],
-                output_path=output_file
-            )
-
-        # Merge all audio files
-        await status_msg.edit_text(f"⏳ កំពុងរួមបញ្ចូលគ្នា {len(audio_files)} ឯកសារអូឌីអូ...")
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_merged:
-            merged_file = tmp_merged.name
-        
-        if merge_audio_files(audio_files, merged_file):
-            caption = f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n📄 ឯកសារ: `{doc.file_name}`\n📊 Subtitles: {len(subtitles)}\n⏱️ Synced to timeline"
-
-            with open(merged_file, "rb") as audio:
-                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
-
-            await status_msg.delete()
-
-            # Clean up temp files
-            for audio_file in audio_files + [merged_file]:
-                if os.path.exists(audio_file):
-                    os.remove(audio_file)
-            if os.path.exists(srt_path):
-                os.remove(srt_path)
-        else:
-            await status_msg.edit_text("❌ មានបញ្ហាក្នុងការរួមបញ្ចូលគ្នា!")
+        if os.path.exists(srt_path):
+            os.remove(srt_path)
 
     except Exception as e:
         print(f"[ERROR] {str(e)}")
