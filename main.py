@@ -15,8 +15,8 @@ from telegram.ext import (
 import edge_tts
 
 # ==================== CONFIGURATION ====================
-# ដាក់ Telegram Bot Token របស់អ្នកនៅទីនេះ
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+# ទាញយក Token ចេញពី Render Environment Variable
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 
 # ឈ្មោះសំឡេងខ្មែរ Edge-TTS
 VOICE_PISETH = "km-KH-PisethNeural"
@@ -26,7 +26,7 @@ VOICE_SREYMOM = "km-KH-SreymomNeural"
 DEFAULT_SETTINGS = {
     "voice": VOICE_PISETH,
     "pitch": "+0Hz",
-    "speed_mode": "auto",  # 'auto' ឬ percentage ជាក់លាក់ដូចជា '+0%', '+40%'
+    "speed_mode": "auto",  # 'auto' ឬ percentage ជាក់លាក់ដូចជា '+0%', '+45%'
 }
 
 # រក្សាទុក Setting របស់អ្នកប្រើប្រាស់ម្នាក់ៗ
@@ -244,8 +244,8 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
 def main():
     """ចាប់ផ្តើម Bot"""
-    if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("❌ សូមដាក់ TELEGRAM BOT TOKEN របស់អ្នកនៅក្នុងកូដជាមុនសិន!")
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        print("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
