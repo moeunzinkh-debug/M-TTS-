@@ -90,7 +90,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """បញ្ជា /settings សម្រាប់ជ្រើសរើសសំឡេង និងការកំណត់"""
+    """បញ្ជា /settings សម្រាប់ជ្រើសរើ･･សំឡេង និងការកំណត់"""
     user_id = update.effective_user.id
     config = get_user_config(user_id)
 
@@ -197,7 +197,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ដំណើរការការ Upload ឯកសារ .srt"""
     doc = update.message.document
-    if not doc.file_name.endswith(".srt"):
+    if not doc.file_name.lower().endswith(".srt"):
         await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!")
         return
 
@@ -269,8 +269,9 @@ def main():
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    # Handle document files BEFORE text messages
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     print("🤖 Telegram Bot កំពុងដំណើរការ...")
     app.run_polling()
