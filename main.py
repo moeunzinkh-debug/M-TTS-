@@ -66,7 +66,7 @@ def calculate_speed(text: str, config: dict) -> str:
     elif 30 <= length <= 80:
         return "+45%"
     else:
-        return "+0%"
+        return "+45%"
 
 
 async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, output_path: str):
