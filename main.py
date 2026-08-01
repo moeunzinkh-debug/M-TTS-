@@ -75,6 +75,13 @@ async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, ou
     await communicate.save(output_path)
 
 
+def is_srt_file(filename: str) -> bool:
+    """Check if file is SRT format"""
+    if not filename:
+        return False
+    return filename.lower().endswith('.srt')
+
+
 # ==================== BOT HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,7 +97,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """បញ្ជា /settings សម្រាប់ជ្រើសរើ･･សំឡេង និងការកំណត់"""
+    """បញ្ជា /settings សម្រាប់ជ្រើសរើផលស័ងសំឡេង និងការកំណត់"""
     user_id = update.effective_user.id
     config = get_user_config(user_id)
 
@@ -197,8 +204,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ដំណើរការការ Upload ឯកសារ .srt"""
     doc = update.message.document
-    if not doc.file_name.lower().endswith(".srt"):
-        await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!")
+    
+    # Debug: Print filename to see what we're getting
+    print(f"[DEBUG] Received file: {doc.file_name}")
+    
+    # Check if it's an SRT file
+    if not is_srt_file(doc.file_name):
+        await update.message.reply_text(
+            "⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!\n"
+            "នឹងឯកសារដែលមាន `.srt` extension ប៉ុណ្ណោះ។"
+        )
         return
 
     user_id = update.effective_user.id
