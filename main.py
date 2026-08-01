@@ -82,6 +82,33 @@ def is_srt_file(filename: str) -> bool:
     return filename.lower().endswith('.srt')
 
 
+def is_srt_content(text: str) -> bool:
+    """Detect if text content is SRT format by checking for SRT pattern"""
+    if not text or len(text.strip()) < 20:
+        return False
+    
+    # SRT pattern: number, timestamp with -->, subtitle text
+    srt_pattern = r'\d+\s*\n\s*\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}'
+    return bool(re.search(srt_pattern, text))
+
+
+def extract_text_from_srt_content(srt_text: str) -> str:
+    """Extract only subtitle text from SRT content (remove timings and numbers)"""
+    lines = srt_text.split('\n')
+    subtitle_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # Skip empty lines, numbers, and timestamp lines
+        if (line and 
+            not line.isdigit() and 
+            '-->' not in line and
+            not re.match(r'\d{2}:\d{2}:\d{2},\d{3}', line)):
+            subtitle_lines.append(line)
+    
+    return ' '.join(subtitle_lines)
+
+
 # ==================== BOT HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,7 +117,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "សូមស្វាគមន៍មកកាន់ **Khmer Text-to-Speech Bot**! 🇰🇭\n\n"
         "លោកអ្នកអាច៖\n"
         "1. ផ្ញើសារអត្ថបទជាភាសាខ្មែរមកទីនេះភ្លាមៗ\n"
-        "2. ផ្ញើឯកសារអត្ថបទចម្រៀង/ចំណងជើងរឿងប្រភេទ **.srt**\n\n"
+        "2. ផ្ញើឯកសារអត្ថបទចម្រៀង/ចំណងជើងរឿងប្រភេទ **.srt**\n"
+        "3. ផ្ញើផ្នែក SRT ដោយ Paste ដោយផ្ទាល់\n\n"
         "⚙️ ចុច /settings ដើម្បីកំណត់សំឡេង, Pitch និង Speed"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -172,33 +200,73 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     config = get_user_config(user_id)
     
-    calculated_rate = calculate_speed(text, config)
-
-    status_msg = await update.message.reply_text("⏳ កំពុងបំប្លែងអត្ថបទទៅជាសំឡេង...")
-
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-            output_file = tmp_file.name
-
-        await convert_text_to_audio(
-            text=text,
-            voice=config["voice"],
-            rate=calculated_rate,
-            pitch=config["pitch"],
-            output_path=output_file
-        )
-
-        caption = f"🔊 **សំឡេងខ្មែរ (Edge-TTS)**\n📏 អក្សរ: {len(text)} តួ\n⚡ Speed: {calculated_rate}"
+    # Check if this is SRT content pasted as text
+    if is_srt_content(text):
+        status_msg = await update.message.reply_text("⏳ កំពុងស្វែងរក SRT Content...")
         
-        with open(output_file, "rb") as audio:
-            await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+        try:
+            # Extract text from SRT format
+            extracted_text = extract_text_from_srt_content(text)
+            
+            if not extracted_text.strip():
+                await status_msg.edit_text("❌ មិនមានអត្ថបទក្នុង SRT Content នេះទេ!")
+                return
+            
+            await status_msg.edit_text("⏳ កំពុងបង្កើតសំឡេង...")
+            
+            calculated_rate = calculate_speed(extracted_text, config)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                output_file = tmp_file.name
+            
+            await convert_text_to_audio(
+                text=extracted_text,
+                voice=config["voice"],
+                rate=calculated_rate,
+                pitch=config["pitch"],
+                output_path=output_file
+            )
+            
+            caption = f"🎬 **SRT Content បានរូបាយ!**\n📏 អក្សរ: {len(extracted_text)} តួ\n⚡ Speed: {calculated_rate}"
+            
+            with open(output_file, "rb") as audio:
+                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+            
+            await status_msg.delete()
+            if os.path.exists(output_file):
+                os.remove(output_file)
+        
+        except Exception as e:
+            await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការ SRT Content៖ {str(e)}")
+    
+    else:
+        # Regular text message
+        calculated_rate = calculate_speed(text, config)
+        status_msg = await update.message.reply_text("⏳ កំពុងបំប្លែងអត្ថបទទៅជាសំឡេង...")
 
-        await status_msg.delete()
-        if os.path.exists(output_file):
-            os.remove(output_file)
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                output_file = tmp_file.name
 
-    except Exception as e:
-        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការបំប្លែងសំឡេង៖ {str(e)}")
+            await convert_text_to_audio(
+                text=text,
+                voice=config["voice"],
+                rate=calculated_rate,
+                pitch=config["pitch"],
+                output_path=output_file
+            )
+
+            caption = f"🔊 **សំឡេងខ្មែរ (Edge-TTS)**\n📏 អក្សរ: {len(text)} តួ\n⚡ Speed: {calculated_rate}"
+            
+            with open(output_file, "rb") as audio:
+                await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+
+            await status_msg.delete()
+            if os.path.exists(output_file):
+                os.remove(output_file)
+
+        except Exception as e:
+            await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការបំប្លែងសំឡេង៖ {str(e)}")
 
 
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
