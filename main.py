@@ -15,6 +15,7 @@ from telegram.ext import (
     filters,
 )
 import edge_tts
+from pydub import AudioSegment
 
 # ==================== DUMMY WEB SERVER FOR RENDER PORT BINDING ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -72,31 +73,17 @@ def calculate_speed(text: str, config: dict) -> str:
 def calculate_speed_for_duration(text_length: int, duration_ms: int) -> str:
     """
     គណនាល្បឿនស្វ័យប្រវត្តិដើម្បីឱ្យ audio ត្រូវលេងក្នុងរយៈពេលដែលបានកំណត់
-    ឧទាហរណ៍: ប្រសិនបើ duration = 3500ms (3.5 វិនាទី)
-    អូឌីអូត្រូវលេងក្នុង 3.5 វិនាទីពិតប្រាកដ
     """
     if duration_ms <= 0 or text_length <= 0:
         return "+0%"
     
-    # អក្សរលឿនប្រហែល 1-2 អក្សរក្នុង 100ms
-    # ដូច្នេះយើងគណនាល្បឿនដែលចាំបាច់
-    
-    # ពេលលឿនលំនាំដើម: 1 វិនាទី = 1000ms
     duration_sec = duration_ms / 1000.0
-    
-    # ប៉ាន់ប្រមាណឧបមាថា 1 អក្សរ ≈ 150ms ក្នុងល្បឿនធម្មតា
     estimated_normal_duration_ms = text_length * 150
     estimated_normal_duration_sec = estimated_normal_duration_ms / 1000.0
     
-    # គណនាល្បឿនដែលចាំបាច់ = ពេលលឿន / ពេលលឿនលំនាំដើម
-    # រូបមន្ត: speed = (estimated_duration / actual_duration) * 100 - 100
     speed_ratio = estimated_normal_duration_sec / duration_sec
-    
-    # បម្លែងទៅ Edge-TTS format
     speed_percent = int((speed_ratio - 1) * 100)
-    
-    # ដាក់ដែនកំណត់
-    speed_percent = max(-90, min(100, speed_percent))  # Edge-TTS: -90% ដល់ +100%
+    speed_percent = max(-90, min(100, speed_percent))
     
     if speed_percent > 0:
         return f"+{speed_percent}%"
@@ -108,6 +95,34 @@ async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, ou
     """បំប្លែង Text ទៅជា Audio MP3 ដោយប្រើ Edge-TTS"""
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
     await communicate.save(output_path)
+
+
+def merge_audio_files(audio_file_list: list, output_path: str) -> bool:
+    """
+    រួមបញ្ចូលគ្នា (Merge) MP3 ឯកសារច្រើនជាឯកសារមួយ
+    audio_file_list: 리ストចូលក្នុង MP3 files
+    output_path: ផ្លូវលទ្ធផល
+    """
+    try:
+        if not audio_file_list:
+            return False
+        
+        # ផ្ទុកឯកសារ MP3 ដំបូង
+        combined = AudioSegment.from_mp3(audio_file_list[0])
+        
+        # ដាច់ सទៀត MP3 ឯកសារដទៀត
+        for audio_file in audio_file_list[1:]:
+            sound = AudioSegment.from_mp3(audio_file)
+            combined += sound
+        
+        # រក្សាទុកឯកសារលទ្ធផល
+        combined.export(output_path, format="mp3", bitrate="192k")
+        print(f"[MERGE] ឯកសារបានរួមបញ្ចូលគ្នាដោយជោគជ័យ: {output_path}")
+        return True
+    
+    except Exception as e:
+        print(f"[ERROR] បញ្ហាក្នុងការរួមបញ្ចូលគ្នា: {str(e)}")
+        return False
 
 
 def is_srt_file(filename: str) -> bool:
@@ -122,7 +137,6 @@ def is_srt_content(text: str) -> bool:
     if not text or len(text.strip()) < 20:
         return False
     
-    # SRT pattern: number, timestamp with -->, subtitle text
     srt_pattern = r'\d+\s*\n\s*\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}'
     return bool(re.search(srt_pattern, text))
 
@@ -157,9 +171,7 @@ def parse_srt_with_timing(srt_text: str) -> list:
     while i < len(lines):
         line = lines[i].strip()
         
-        # Look for subtitle number
         if line.isdigit():
-            # Next line should be timestamp
             if i + 1 < len(lines):
                 timestamp_line = lines[i + 1].strip()
                 match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', timestamp_line)
@@ -168,12 +180,10 @@ def parse_srt_with_timing(srt_text: str) -> list:
                     start_time = match.group(1)
                     end_time = match.group(2)
                     
-                    # Calculate duration in milliseconds
                     start_ms = time_to_ms(start_time)
                     end_ms = time_to_ms(end_time)
                     duration_ms = end_ms - start_ms
                     
-                    # Collect subtitle text lines
                     text_lines = []
                     j = i + 2
                     while j < len(lines) and lines[j].strip() and not lines[j].strip().isdigit():
@@ -293,31 +303,26 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         status_msg = await update.message.reply_text("⏳ កំពុងវិភាគ SRT Content...")
         
         try:
-            # Parse SRT with timing information
             subtitles = parse_srt_with_timing(text)
             
             if not subtitles:
-                await status_msg.edit_text("❌ មិនមានអត្ថប�ططក្នុង SRT Content នេះទេ!")
+                await status_msg.edit_text("❌ មិនមានអត្ថបទក្នុង SRT Content នេះទេ!")
                 return
             
             await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
             
-            # Process each subtitle
             audio_files = []
-            subtitle_info = []
             
             for idx, subtitle in enumerate(subtitles):
                 text_content = subtitle['text']
                 duration_ms = subtitle['duration_ms']
                 
-                # Calculate speed based on duration to fit the timeline
                 if config["speed_mode"] == "auto":
                     calculated_rate = calculate_speed_for_duration(len(text_content), duration_ms)
                 else:
                     calculated_rate = config["speed_mode"]
                 
-                subtitle_info.append(f"[{idx+1}] Duration: {duration_ms}ms, Speed: {calculated_rate}")
-                print(f"[SRT] Subtitle {idx+1}: '{text_content}' | Duration: {duration_ms}ms | Speed: {calculated_rate}")
+                print(f"[SRT] Subtitle {idx+1}: '{text_content[:50]}...' | Duration: {duration_ms}ms | Speed: {calculated_rate}")
                 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
                     output_file = tmp_file.name
@@ -331,19 +336,26 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     output_path=output_file
                 )
             
-            # Send audio file
-            if audio_files:
+            # Merge all audio files
+            await status_msg.edit_text(f"⏳ កំពុងរួមបញ្ចូលគ្នា {len(audio_files)} ឯកសារអូឌីអូ...")
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_merged:
+                merged_file = tmp_merged.name
+            
+            if merge_audio_files(audio_files, merged_file):
                 caption = f"🎬 **SRT Content បានរូបាយ!**\n📊 Subtitles: {len(subtitles)}\n⏱️ Synced to timeline"
                 
-                with open(audio_files[-1], "rb") as audio:
+                with open(merged_file, "rb") as audio:
                     await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
-            
-            # Clean up temp files
-            for audio_file in audio_files:
-                if os.path.exists(audio_file):
-                    os.remove(audio_file)
-            
-            await status_msg.delete()
+                
+                await status_msg.delete()
+                
+                # Clean up temp files
+                for audio_file in audio_files + [merged_file]:
+                    if os.path.exists(audio_file):
+                        os.remove(audio_file)
+            else:
+                await status_msg.edit_text("❌ មានបញ្ហាក្នុងការរួមបញ្ចូលគ្នា!")
         
         except Exception as e:
             print(f"[ERROR] {str(e)}")
@@ -385,7 +397,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     
     print(f"[DEBUG] Received file: {doc.file_name}")
     
-    # Check if it's an SRT file
     if not is_srt_file(doc.file_name):
         await update.message.reply_text(
             "⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!\n"
@@ -405,26 +416,22 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        # Read SRT file content
         with open(srt_path, 'r', encoding='utf-8') as f:
             srt_content = f.read()
         
-        # Parse SRT with timing information
         subtitles = parse_srt_with_timing(srt_content)
         
         if not subtitles:
-            await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបើទឡើយ!")
+            await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
             return
 
         await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(subtitles)} subtitle...")
 
-        # Generate audio for each subtitle with timeline-synced speed
         audio_files = []
         for idx, subtitle in enumerate(subtitles):
             text_content = subtitle['text']
             duration_ms = subtitle['duration_ms']
             
-            # Calculate speed to fit the duration
             if config["speed_mode"] == "auto":
                 calculated_rate = calculate_speed_for_duration(len(text_content), duration_ms)
             else:
@@ -444,21 +451,28 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
                 output_path=output_file
             )
 
-        # Send audio file
-        if audio_files:
+        # Merge all audio files
+        await status_msg.edit_text(f"⏳ កំពុងរួមបញ្ចូលគ្នា {len(audio_files)} ឯកសារអូឌីអូ...")
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_merged:
+            merged_file = tmp_merged.name
+        
+        if merge_audio_files(audio_files, merged_file):
             caption = f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n📄 ឯកសារ: `{doc.file_name}`\n📊 Subtitles: {len(subtitles)}\n⏱️ Synced to timeline"
 
-            with open(audio_files[-1], "rb") as audio:
+            with open(merged_file, "rb") as audio:
                 await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
 
-        await status_msg.delete()
+            await status_msg.delete()
 
-        # Clean up temp files
-        for audio_file in audio_files:
-            if os.path.exists(audio_file):
-                os.remove(audio_file)
-        if os.path.exists(srt_path):
-            os.remove(srt_path)
+            # Clean up temp files
+            for audio_file in audio_files + [merged_file]:
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
+            if os.path.exists(srt_path):
+                os.remove(srt_path)
+        else:
+            await status_msg.edit_text("❌ មានបញ្ហាក្នុងការរួមបញ្ចូលគ្នា!")
 
     except Exception as e:
         print(f"[ERROR] {str(e)}")
@@ -473,7 +487,6 @@ def main():
         print("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
-    # បង្កើត Background Thread សម្រាប់រត់ Web Server Bind Port Render
     health_thread = threading.Thread(target=start_health_check_server, daemon=True)
     health_thread.start()
 
@@ -483,7 +496,6 @@ def main():
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Handle document files BEFORE text messages
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
