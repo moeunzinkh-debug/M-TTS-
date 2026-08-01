@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 import tempfile
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import pysrt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,22 +16,36 @@ from telegram.ext import (
 )
 import edge_tts
 
+# ==================== DUMMY WEB SERVER FOR RENDER PORT BINDING ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Khmer TTS Bot is running!")
+
+    def log_message(self, format, *args):
+        # បិទ Log របស់ HTTP Server ដើម្បីកុំឱ្យរំខាន Terminal Log
+        return
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"🌐 Health Check Server running on port {port}")
+    server.serve_forever()
+
 # ==================== CONFIGURATION ====================
-# ទាញយក Token ចេញពី Render Environment Variable
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 
-# ឈ្មោះសំឡេងខ្មែរ Edge-TTS
 VOICE_PISETH = "km-KH-PisethNeural"
 VOICE_SREYMOM = "km-KH-SreymomNeural"
 
-# Default User Settings
 DEFAULT_SETTINGS = {
     "voice": VOICE_PISETH,
     "pitch": "+0Hz",
-    "speed_mode": "auto",  # 'auto' ឬ percentage ជាក់លាក់ដូចជា '+0%', '+45%'
+    "speed_mode": "auto",
 }
 
-# រក្សាទុក Setting របស់អ្នកប្រើប្រាស់ម្នាក់ៗ
 user_settings = {}
 
 
@@ -45,10 +61,8 @@ def calculate_speed(text: str, config: dict) -> str:
         return config["speed_mode"]
 
     length = len(text.strip())
-    # 1 - 30 characters -> Normal speed (+0%)
     if 1 <= length < 30:
         return "+0%"
-    # 30 - 80 characters -> Speed 1.4x to 1.5x (+45%)
     elif 30 <= length <= 80:
         return "+45%"
     else:
@@ -151,7 +165,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     config = get_user_config(user_id)
     
-    # គណនាល្បឿនតាមអត្ថបទ (Auto Detection 30-80 chars)
     calculated_rate = calculate_speed(text, config)
 
     status_msg = await update.message.reply_text("⏳ កំពុងបំប្លែងអត្ថបទទៅជាសំឡេង...")
@@ -200,7 +213,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        # អាន Subtitle ពី SRT File
         subs = pysrt.open(srt_path, encoding="utf-8")
         full_text = " ".join([sub.text_without_tags.replace("\n", " ") for sub in subs])
 
@@ -230,7 +242,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await status_msg.delete()
 
-        # លុប Temporary Files ចោល
         if os.path.exists(srt_path):
             os.remove(srt_path)
         if os.path.exists(mp3_path):
@@ -248,14 +259,16 @@ def main():
         print("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
+    # បង្កើត Background Thread សម្រាប់រត់ Web Server Bind Port Render
+    health_thread = threading.Thread(target=start_health_check_server, daemon=True)
+    health_thread.start()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Messages Handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
 
