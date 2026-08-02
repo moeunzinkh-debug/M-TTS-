@@ -124,7 +124,7 @@ def build_timeline_audio(subtitles_data: list, output_path: str) -> bool:
             if not os.path.exists(audio_path):
                 continue
 
-            # ១. ប្រសិនបើ Timeline បច្ចុប្បន្នទាន់ដល់ Start Time នៃ Subtitle បន្ទាប់ ត្រូវបន្ថែម Silence Gap
+            # ១. ប្រសិនបើ Timeline បច្ចុប្បន្នទាន់ដល់ Start Time នៃ Subtitle បន្ទាប់ ត្រូវបន្ថែម Sile[...]
             if start_ms > current_timeline_ms:
                 gap_duration = start_ms - current_timeline_ms
                 final_audio += AudioSegment.silent(duration=gap_duration)
@@ -369,9 +369,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ដំណើរការការ Upload ឯកសារ .srt"""
-    doc = update.message.document
-    
-    if not is_srt_file(doc.file_name):
+    doc = getattr(update.message, 'document', None)
+
+    if not doc:
+        await update.message.reply_text("⚠️ មិនមានឯកសារ ទទួលបាន។")
+        return
+
+    filename = getattr(doc, 'file_name', '') or ''
+    if not is_srt_file(filename):
         await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!")
         return
 
@@ -380,6 +385,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
     status_msg = await update.message.reply_text("⏳ កំពុងទាញយក និងវិភាគឯកសារ .SRT...")
 
+    srt_path = None
     try:
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".srt") as tmp_srt:
@@ -387,15 +393,30 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        subs = pysrt.open(srt_path, encoding="utf-8")
-        await process_srt_subs(subs, update, config, status_msg)
+        # Try to parse with pysrt, with fallback to reading file as string
+        try:
+            subs = pysrt.open(srt_path, encoding="utf-8")
+        except Exception:
+            with open(srt_path, "r", encoding="utf-8", errors="ignore") as f:
+                srt_content = f.read()
+            subs = pysrt.from_string(srt_content)
 
-        if os.path.exists(srt_path):
-            os.remove(srt_path)
+        await process_srt_subs(subs, update, config, status_msg)
 
     except Exception as e:
         print(f"[ERROR] {str(e)}")
-        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
+        try:
+            await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
+        except Exception:
+            pass
+
+    finally:
+        # Ensure the uploaded SRT temp file is removed
+        if srt_path and os.path.exists(srt_path):
+            try:
+                os.remove(srt_path)
+            except Exception:
+                pass
 
 
 # ==================== MAIN EXECUTION ====================
