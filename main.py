@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import tempfile
+import logging
 import pysrt
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,9 +16,17 @@ from telegram.ext import (
 )
 import edge_tts
 
+# Logging Setup
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 PORT = int(os.environ.get("PORT", 8080))
+# Render នឹងផ្ដល់ RENDER_EXTERNAL_URL ស្វ័យប្រវត្តិនៅលើ Cloud
+WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 VOICE_PISETH = "km-KH-PisethNeural"
 VOICE_SREYMOM = "km-KH-SreymomNeural"
@@ -25,7 +34,7 @@ VOICE_SREYMOM = "km-KH-SreymomNeural"
 DEFAULT_SETTINGS = {
     "voice": VOICE_PISETH,
     "pitch": "+0Hz",
-    "speed_mode": "auto",  # 'auto' ឬ percentage ជាក់លាក់ដូចជា '+0%', '+45%'
+    "speed_mode": "auto",
 }
 
 user_settings = {}
@@ -43,10 +52,8 @@ def calculate_speed(text: str, config: dict) -> str:
         return config["speed_mode"]
 
     length = len(text.strip())
-    # 1 - 30 characters -> Normal speed (+0%)
     if 1 <= length < 30:
         return "+0%"
-    # 30 - 80 characters -> Speed (+45%)
     elif 30 <= length <= 80:
         return "+45%"
     else:
@@ -197,13 +204,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await file.download_to_drive(srt_path)
 
-        # អាន Subtitle ពី SRT File
         subs = pysrt.open(srt_path, encoding="utf-8")
         if not subs:
             await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
             return
 
-        # អានអត្ថបទទាំងអស់ដោយរក្សាចន្លោះ Subtitle តាម Timeline
         full_text_list = []
         for sub in subs:
             text = sub.text_without_tags.replace("\n", " ").strip()
@@ -243,57 +248,59 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
 
 
-# ==================== DUMMY WEB SERVER FOR PORT BINDING ====================
+# ==================== WEBHOOK SERVER SETUP ====================
 
-async def handle_health_check(request):
-    """Endpoint សម្រាប់ឆ្លើយតប Render មើល Port status"""
-    return web.Response(text="Bot is running live!")
-
-
-async def start_dummy_web_server():
-    """បើក Web Server តូចមួយដើម្បី Bind Port សម្រាប់ Render"""
-    app = web.Application()
-    app.router.add_get("/", handle_health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"🌐 Fake Web Server listening on port {PORT}")
-
-
-# ==================== MAIN EXECUTION ====================
-
-async def main_async():
+async def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
+        logger.error("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
-    # ១. ចាប់ផ្តើម Web Server ឱ្យ Render ស្គាល់ Port
-    await start_dummy_web_server()
-
-    # ២. បង្កើត និងរត់ Telegram Bot
+    # ១. បង្កើត Telegram Application Setup
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Messages Handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
 
-    print("🤖 Telegram Bot កំពុងដំណើរការ...")
-    async with app:
-        await app.start()
-        await app.updater.start_polling()
-        # រក្សា Async Loop ឱ្យដំណើការរហូត
-        await asyncio.Event().wait()
+    await app.initialize()
+    await app.start()
 
+    # ២. កំណត់ Webhook Path 
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
 
-def main():
-    asyncio.run(main_async())
+    if WEBHOOK_URL:
+        await app.bot.set_webhook(url=full_webhook_url)
+        logger.info(f"✅ Set Webhook ជោគជ័យទៅកាន់៖ {full_webhook_url}")
+    else:
+        logger.warning("⚠️ មិនឃើញ RENDER_EXTERNAL_URL ទេ! Webhook អាចនឹងមិនដំណើរការនៅលើ Cloud។")
+
+    # ៣. បង្កើត Web Server រង់ចាំទទួល HTTP Requests ពី Telegram Webhook
+    async def telegram_webhook_handler(request):
+        """ទទួល Post Data ពី Telegram រួច Feed ចូល Telegram Application"""
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.Response(status=200)
+
+    async def health_check_handler(request):
+        return web.Response(text="Bot Webhook Server is Alive!")
+
+    web_app = web.Application()
+    web_app.router.add_post(webhook_path, telegram_webhook_handler)
+    web_app.router.add_get("/", health_check_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    logger.info(f"🚀 Webhook Web Server ត្រូវបានបើកលើ Port: {PORT}")
+    await site.start()
+
+    # រក្សា Server ឱ្យរត់រហូត
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
