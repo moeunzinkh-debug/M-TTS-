@@ -3,6 +3,7 @@ import re
 import asyncio
 import tempfile
 import pysrt
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,6 +17,7 @@ import edge_tts
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+PORT = int(os.environ.get("PORT", 8080))
 
 VOICE_PISETH = "km-KH-PisethNeural"
 VOICE_SREYMOM = "km-KH-SreymomNeural"
@@ -241,14 +243,35 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
 
 
+# ==================== DUMMY WEB SERVER FOR PORT BINDING ====================
+
+async def handle_health_check(request):
+    """Endpoint សម្រាប់ឆ្លើយតប Render មើល Port status"""
+    return web.Response(text="Bot is running live!")
+
+
+async def start_dummy_web_server():
+    """បើក Web Server តូចមួយដើម្បី Bind Port សម្រាប់ Render"""
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Fake Web Server listening on port {PORT}")
+
+
 # ==================== MAIN EXECUTION ====================
 
-def main():
-    """ចាប់ផ្តើម Bot"""
+async def main_async():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         print("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
+    # ១. ចាប់ផ្តើម Web Server ឱ្យ Render ស្គាល់ Port
+    await start_dummy_web_server()
+
+    # ២. បង្កើត និងរត់ Telegram Bot
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands Handlers
@@ -261,7 +284,15 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
 
     print("🤖 Telegram Bot កំពុងដំណើរការ...")
-    app.run_polling()
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        # រក្សា Async Loop ឱ្យដំណើការរហូត
+        await asyncio.Event().wait()
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
