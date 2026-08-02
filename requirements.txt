@@ -1,6 +1,3 @@
 python-telegram-bot
 edge-tts
 pysrt
-pydub
-pyaudioop
-ffmpeg-python
