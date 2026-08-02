@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: pserv
     name: khmer-tts-telegram-bot
     env: python
     buildCommand: pip install -r requirements.txt
@@ -8,3 +8,5 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: PORT
+        value: 8080
