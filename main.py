@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import tempfile
+import io
 import logging
 import pysrt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,6 +15,7 @@ from telegram.ext import (
     filters,
 )
 import edge_tts
+from pydub import AudioSegment
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -43,7 +45,6 @@ def get_user_config(user_id: int):
 
 
 def detect_voice_tag(text: str) -> tuple:
-    """រក (men) ឬ (girl) នៅដើមឃ្លា ហើយវាចេញ"""
     text = text.strip()
     if text.startswith("(men)"):
         return VOICE_PISETH, text[5:].strip()
@@ -53,7 +54,6 @@ def detect_voice_tag(text: str) -> tuple:
 
 
 def calculate_chunk_speed(text: str, duration_ms: int) -> str:
-    """គណនាល្បឿនតាម chunk (អក្សរ + ពេលវេលា)"""
     if duration_ms <= 0:
         return "+0%"
     text_length = len(text.strip())
@@ -75,28 +75,22 @@ def calculate_chunk_speed(text: str, duration_ms: int) -> str:
         return "-30%"
 
 
-async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, output_path: str):
+async def tts_to_bytes(text: str, voice: str, rate: str, pitch: str) -> bytes:
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-    await communicate.save(output_path)
+    data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            data += chunk["data"]
+    return data
 
 
-async def merge_audio_files(audio_files: list, output_path: str):
-    """បញ្ចូល MP3 ច្រើនឯកសារជាឯកសារតែមួយ"""
-    from pydub import AudioSegment
-    combined = AudioSegment.empty()
-    for f in audio_files:
-        combined += AudioSegment.from_mp3(f)
-    combined.export(output_path, format="mp3")
-
-
-# ==================== BOT HANDLERS ====================
+# ==================== HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "សូមស្វាគមន៍មកកាន់ **Khmer Text-to-Speech Bot**! 🇰🇭\n\n"
-        "លោកអ្នកអាច៖\n"
-        "1. ផ្ញើសារអត្ថបទជាភាសាខ្មែរមកទីនេះភ្លាមៗ\n"
-        "2. ផ្ញើឯកសារអត្ថបទចម្រៀង/ចំណងជើងរឿងប្រភេទ **.srt**\n\n"
+        "1. ផ្ញើសារអត្ថបទជាភាសាខ្មែរ\n"
+        "2. ផ្ញើឯកសារ **.srt**\n\n"
         "⚙️ ចុច /settings ដើម្បីកំណត់សំឡេង, Pitch និង Speed"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -135,7 +129,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("⚡ 1.6x", callback_data="set_speed_+60%"),
-            InlineKeyboardButton("⚡ 1.8x (លឿន)", callback_data="set_speed_+80%"),
+            InlineKeyboardButton("⚡ 1.8x8x (លឿន)", callback_data="set_speed_+80%"),
         ],
         [
             InlineKeyboardButton("🎶 Pitch: -10Hz", callback_data="set_pitch_-10Hz"),
@@ -184,14 +178,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config["pitch"] = "+10Hz"
     voice_name = "Piseth (ប្រុស)" if config["voice"] == VOICE_PISETH else "Sreymom (ស្រី)"
     speed_label = {
-        "auto": "Auto (ស្វ័យប្រវត្តិ)",
-        "-30%": "Slow 0.7x",
-        "-15%": "Slow 0.85x",
-        "+0%": "Normal 1.0x",
-        "+20%": "Fast 1.2x",
-        "+40%": "Fast 1.4x",
-        "+60%": "Fast 1.6x",
-        "+80%": "Fast 1.8x",
+        "auto": "Auto", "-30%": "0.7x", "-15%": "0.85x", "+0%": "1.0x",
+        "+20%": "1.2x", "+40%": "1.4x", "+60%": "1.6x", "+80%": "1.8x",
     }.get(config["speed"], config["speed"])
     await query.edit_message_text(
         f"✅ **បានផ្លាស់ប្តូរការកំណត់រួចរាល់!**\n\n"
@@ -208,12 +196,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     user_id = update.effective_user.id
     config = get_user_config(user_id)
-    
-    # រក voice tag នៅដើមឃ្លា
     voice_override, clean_text = detect_voice_tag(text)
     voice = voice_override if voice_override else config["voice"]
-    
-    # គណនាល្បឿនតាមប្រវែងអក្សរ (text ធម្មតា)
     length = len(clean_text.strip())
     if config["speed"] == "auto":
         if length < 20:
@@ -230,17 +214,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         calculated_rate = config["speed"]
 
     status_msg = await update.message.reply_text("⏳ កំពុងបំប្លែងអត្ថបទទៅជាសំឡេង...")
-    output_file = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-            output_file = tmp_file.name
-        await convert_text_to_audio(
-            text=clean_text,
-            voice=voice,
-            rate=calculated_rate,
-            pitch=config["pitch"],
-            output_path=output_file
-        )
+        audio_bytes = await tts_to_bytes(clean_text, voice, calculated_rate, config["pitch"])
         speed_label = {
             "auto": "Auto", "-30%": "0.7x", "-15%": "0.85x", "+0%": "1.0x",
             "+20%": "1.2x", "+40%": "1.4x", "+60%": "1.6x", "+80%": "1.8x",
@@ -252,15 +227,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"⚡ Speed: {calculated_rate} ({speed_label})\n"
             f"🎶 Pitch: {config['pitch']}"
         )
-        with open(output_file, "rb") as audio:
-            await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
+        await update.message.reply_audio(audio=io.BytesIO(audio_bytes), caption=caption, parse_mode="Markdown")
         await status_msg.delete()
     except Exception as e:
-        logger.error(f"Error converting text: {e}")
-        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការបំប្លែងសំឡេង៖ {str(e)}")
-    finally:
-        if output_file and os.path.exists(output_file):
-            os.remove(output_file)
+        logger.error(f"Error: {e}")
+        await status_msg.edit_text(f"❌ មានបញ្ហា៖ {str(e)}")
 
 
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,8 +245,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     status_msg = await update.message.reply_text("⏳ កំពុងទាញយក និងអានឯកសារ .SRT...")
 
     srt_path = None
-    chunk_files = []
-
     try:
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".srt") as tmp_srt:
@@ -287,21 +256,15 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
             return
 
-        # បែងចែក chunk និមួយៗ
         chunks = []
         for sub in subs:
             text = sub.text_without_tags.replace("\n", " ").strip()
             if not text:
                 continue
-            
-            # រក voice tag
             voice_override, clean_text = detect_voice_tag(text)
             voice = voice_override if voice_override else config["voice"]
-            
-            # គណនា duration និង speed
             duration_ms = sub.end.ordinal - sub.start.ordinal
             speed = calculate_chunk_speed(clean_text, duration_ms)
-            
             chunks.append({
                 "text": clean_text,
                 "voice": voice,
@@ -315,32 +278,25 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(chunks)} chunk...")
 
-        # បង្កើតសំឡេងដាច់ដោយឡែកសម្រាប់ chunk នីមួយៗ
-        for i, chunk in enumerate(chunks):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{i}.mp3") as tmp:
-                chunk_path = tmp.name
-            await convert_text_to_audio(
-                text=chunk["text"],
-                voice=chunk["voice"],
-                rate=chunk["speed"],
-                pitch=config["pitch"],
-                output_path=chunk_path
-            )
-            chunk_files.append(chunk_path)
+        # បង្កើតសំឡេងដាច់ដោយឡែកហើយបញ្ចូលក្នុង memory
+        combined_audio = AudioSegment.empty()
+        for chunk in chunks:
+            audio_bytes = await tts_to_bytes(chunk["text"], chunk["voice"], chunk["speed"], config["pitch"])
+            if audio_bytes:
+                segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                combined_audio += segment
 
-        # បញ្ចូល MP3 ទាំងអស់ជាឯកសារតែមួយ
+        # រក្សាទុកជា MP3 តែមួយ
         mp3_path = None
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_mp3:
             mp3_path = tmp_mp3.name
-        
-        await merge_audio_files(chunk_files, mp3_path)
+        combined_audio.export(mp3_path, format="mp3")
 
-        # បង្កើត caption បង្ហាញព័ត៌មាន chunk
+        # បង្ហាញព័ត៌មាន chunk
         chunk_info = []
-        for i, chunk in enumerate(chunks[:5]):  # បង្ហាញតែ 5 chunk ដំបូង
+        for i, chunk in enumerate(chunks[:5]):
             v_name = "ប្រុស" if chunk["voice"] == VOICE_PISETH else "ស្រី"
             chunk_info.append(f"#{i+1}: {chunk['speed']} ({v_name})")
-        
         chunk_summary = " | ".join(chunk_info)
         if len(chunks) > 5:
             chunk_summary += f" ... (+{len(chunks)-5} ទៀត)"
@@ -364,21 +320,18 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Error processing SRT: {e}")
-        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
+        logger.error(f"Error: {e}")
+        await status_msg.edit_text(f"❌ មានបញ្ហា៖ {str(e)}")
     finally:
         if srt_path and os.path.exists(srt_path):
             os.remove(srt_path)
-        for f in chunk_files:
-            if os.path.exists(f):
-                os.remove(f)
         if 'mp3_path' in dir() and mp3_path and os.path.exists(mp3_path):
             os.remove(mp3_path)
 
 
 def main():
     if not BOT_TOKEN:
-        logger.error("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
+        logger.error("❌ សូមដាក់ TELEGRAM BOT TOKEN!")
         return
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
@@ -389,7 +342,7 @@ def main():
     if WEBHOOK_URL:
         webhook_path = f"/webhook/{BOT_TOKEN}"
         full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
-        logger.info(f"✅ Webhook URL: {full_webhook_url}")
+        logger.info(f"✅ Webhook: {full_webhook_url}")
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -397,7 +350,7 @@ def main():
             webhook_url=full_webhook_url,
         )
     else:
-        logger.info("🚀 Bot running with Polling (local mode)")
+        logger.info("🚀 Polling mode")
         app.run_polling()
 
 
