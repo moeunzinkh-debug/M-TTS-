@@ -4,7 +4,6 @@ import asyncio
 import tempfile
 import logging
 import pysrt
-from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -23,9 +22,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 8080))
-# Render នឹងផ្ដល់ RENDER_EXTERNAL_URL ស្វ័យប្រវត្តិនៅលើ Cloud
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 VOICE_PISETH = "km-KH-PisethNeural"
@@ -34,7 +32,7 @@ VOICE_SREYMOM = "km-KH-SreymomNeural"
 DEFAULT_SETTINGS = {
     "voice": VOICE_PISETH,
     "pitch": "+0Hz",
-    "speed_mode": "auto",
+    "speed": "auto",        # auto, slow, normal, fast
 }
 
 user_settings = {}
@@ -46,18 +44,56 @@ def get_user_config(user_id: int):
     return user_settings[user_id]
 
 
-def calculate_speed(text: str, config: dict) -> str:
-    """គណនាល្បឿនស្វ័យប្រវត្តិតាមប្រវែងអក្សរ (Auto Speed Detection)"""
-    if config["speed_mode"] != "auto":
-        return config["speed_mode"]
+def calculate_speed(text: str, config: dict, is_srt: bool = False, srt_duration_ms: int = 0) -> str:
+    """
+    គណនាល្បឿនសម្រាប់ TTS
+    - Text ធម្មតា: តាមប្រវែងអក្សរ (auto) ឬតាមការកំណត់ដោយដៃ
+    - SRT: តាម duration និងប្រវែងអក្សរ (គណនាល្បឿនដើម្បីឱ្យអានចប់ត្រឹមត្រូវនឹងពេលវេលា)
+    """
+    speed_setting = config.get("speed", "auto")
 
+    # ប្រសិនបើអ្នកប្រើប្រាស់កំណត់ល្បឿនដោយដៃ (មិនមែន auto)
+    if speed_setting != "auto":
+        return speed_setting
+
+    # សម្រាប់ SRT - គណនាតាម duration និងប្រវែងអក្សរ
+    if is_srt and srt_duration_ms > 0:
+        # គណនាល្បឿនដើម្បីឱ្យអានចប់ក្នុងពេលវេលា subtitle
+        # ឧទាហរណ៍: 100 អក្សរ / 5 វិនាទី = 20 អក្សរ/វិនាទី (ល្បឿនមធ្យម)
+        # ប្រសិនបើច្រើនអក្សរក្នុងពេលតិច -> លឿនជាង
+        text_length = len(text.strip())
+        duration_sec = srt_duration_ms / 1000.0
+
+        if duration_sec <= 0:
+            return "+0%"
+
+        chars_per_sec = text_length / duration_sec
+
+        # ល្បឿនធម្មតា ~ 15 អក្សរ/វិនាទី
+        # ប្រសិនបើ chars_per_sec > 15 -> លឿនជាង -> បង្កើនល្បឿន TTS
+        if chars_per_sec > 25:
+            return "+60%"
+        elif chars_per_sec > 20:
+            return "+45%"
+        elif chars_per_sec > 15:
+            return "+30%"
+        elif chars_per_sec < 8:
+            return "-20%"
+        else:
+            return "+0%"
+
+    # សម្រាប់ Text ធម្មតា - តាមប្រវែងអក្សរ
     length = len(text.strip())
-    if 1 <= length < 30:
+    if length < 20:
+        return "-10%"      # អត្ថបទខ្លី -> យឺតបន្តិចដើម្បីឮច្បាស់
+    elif length < 50:
         return "+0%"
-    elif 30 <= length <= 80:
-        return "+45%"
+    elif length < 100:
+        return "+20%"
+    elif length < 200:
+        return "+35%"
     else:
-        return "+0%"
+        return "+50%"      # អត្ថបទវែង -> លឿនជាងបន្តិច
 
 
 async def convert_text_to_audio(text: str, voice: str, rate: str, pitch: str, output_path: str):
@@ -86,20 +122,46 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_user_config(user_id)
 
     voice_name = "Piseth (ប្រុស)" if config["voice"] == VOICE_PISETH else "Sreymom (ស្រី)"
-    
+    speed_label = {
+        "auto": "Auto (ស្វ័យប្រវត្តិ)",
+        "-20%": "Slow 0.8x (យឺត)",
+        "-10%": "Slow 0.9x (យឺតបន្តិច)",
+        "+0%": "Normal 1.0x (ធម្មតា)",
+        "+20%": "Fast 1.2x (លឿនបន្តិច)",
+        "+35%": "Fast 1.35x (លឿន)",
+        "+45%": "Fast 1.45x (លឿនខ្លាំង)",
+        "+60%": "Fast 1.6x (លឿនខ្លាំងណាស់)",
+    }.get(config["speed"], config["speed"])
+
     keyboard = [
         [
             InlineKeyboardButton("🎙️ Piseth (ប្រុស)", callback_data="set_voice_piseth"),
             InlineKeyboardButton("🎙️ Sreymom (ស្រី)", callback_data="set_voice_sreymom"),
         ],
         [
-            InlineKeyboardButton("⚡ Speed: Auto (30-80 char = 1.4x)", callback_data="set_speed_auto"),
-            InlineKeyboardButton("⚡ Speed: Normal (1.0x)", callback_data="set_speed_normal"),
+            InlineKeyboardButton("⚡ Speed: Auto", callback_data="set_speed_auto"),
+            InlineKeyboardButton("⚡ 0.8x (យឺត)", callback_data="set_speed_-20%"),
         ],
         [
-            InlineKeyboardButton("🎶 Pitch: +0Hz", callback_data="set_pitch_0"),
-            InlineKeyboardButton("🎶 Pitch: +5Hz", callback_data="set_pitch_5"),
-            InlineKeyboardButton("🎶 Pitch: -5Hz", callback_data="set_pitch_minus5"),
+            InlineKeyboardButton("⚡ 0.9x", callback_data="set_speed_-10%"),
+            InlineKeyboardButton("⚡ 1.0x (ធម្មតា)", callback_data="set_speed_+0%"),
+        ],
+        [
+            InlineKeyboardButton("⚡ 1.2x", callback_data="set_speed_+20%"),
+            InlineKeyboardButton("⚡ 1.35x", callback_data="set_speed_+35%"),
+        ],
+        [
+            InlineKeyboardButton("⚡ 1.45x", callback_data="set_speed_+45%"),
+            InlineKeyboardButton("⚡ 1.6x (លឿន)", callback_data="set_speed_+60%"),
+        ],
+        [
+            InlineKeyboardButton("🎶 Pitch: -10Hz", callback_data="set_pitch_-10Hz"),
+            InlineKeyboardButton("🎶 Pitch: -5Hz", callback_data="set_pitch_-5Hz"),
+            InlineKeyboardButton("🎶 Pitch: +0Hz", callback_data="set_pitch_+0Hz"),
+        ],
+        [
+            InlineKeyboardButton("🎶 Pitch: +5Hz", callback_data="set_pitch_+5Hz"),
+            InlineKeyboardButton("🎶 Pitch: +10Hz", callback_data="set_pitch_+10Hz"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -107,8 +169,9 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = (
         f"⚙️ **ការកំណត់បច្ចុប្បន្ន:**\n"
         f"- សំឡេង: **{voice_name}**\n"
-        f"- Speed Mode: **{config['speed_mode']}**\n"
-        f"- Pitch: **{config['pitch']}**"
+        f"- Speed: **{speed_label}**\n"
+        f"- Pitch: **{config['pitch']}**\n\n"
+        f"_ចំណាំ: សម្រាប់ SRT ល្បឿននឹងគណនាស្វ័យប្រវត្តិតាមពេលវេលា subtitle ជានិច្ច_"
     )
     await update.message.reply_text(status_text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -127,21 +190,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "set_voice_sreymom":
         config["voice"] = VOICE_SREYMOM
     elif data == "set_speed_auto":
-        config["speed_mode"] = "auto"
-    elif data == "set_speed_normal":
-        config["speed_mode"] = "+0%"
-    elif data == "set_pitch_0":
-        config["pitch"] = "+0Hz"
-    elif data == "set_pitch_5":
-        config["pitch"] = "+5Hz"
-    elif data == "set_pitch_minus5":
+        config["speed"] = "auto"
+    elif data.startswith("set_speed_"):
+        config["speed"] = data.replace("set_speed_", "")
+    elif data == "set_pitch_-10Hz":
+        config["pitch"] = "-10Hz"
+    elif data == "set_pitch_-5Hz":
         config["pitch"] = "-5Hz"
+    elif data == "set_pitch_+0Hz":
+        config["pitch"] = "+0Hz"
+    elif data == "set_pitch_+5Hz":
+        config["pitch"] = "+5Hz"
+    elif data == "set_pitch_+10Hz":
+        config["pitch"] = "+10Hz"
 
     voice_name = "Piseth (ប្រុស)" if config["voice"] == VOICE_PISETH else "Sreymom (ស្រី)"
+    speed_label = {
+        "auto": "Auto (ស្វ័យប្រវត្តិ)",
+        "-20%": "Slow 0.8x",
+        "-10%": "Slow 0.9x",
+        "+0%": "Normal 1.0x",
+        "+20%": "Fast 1.2x",
+        "+35%": "Fast 1.35x",
+        "+45%": "Fast 1.45x",
+        "+60%": "Fast 1.6x",
+    }.get(config["speed"], config["speed"])
+
     await query.edit_message_text(
         f"✅ **បានផ្លាស់ប្តូរការកំណត់រួចរាល់!**\n\n"
         f"- សំឡេង: **{voice_name}**\n"
-        f"- Speed Mode: **{config['speed_mode']}**\n"
+        f"- Speed: **{speed_label}**\n"
         f"- Pitch: **{config['pitch']}**",
         parse_mode="Markdown"
     )
@@ -155,11 +233,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     user_id = update.effective_user.id
     config = get_user_config(user_id)
-    
-    calculated_rate = calculate_speed(text, config)
+
+    # គណនាល្បឿន (is_srt=False)
+    calculated_rate = calculate_speed(text, config, is_srt=False)
 
     status_msg = await update.message.reply_text("⏳ កំពុងបំប្លែងអត្ថបទទៅជាសំឡេង...")
 
+    output_file = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
             output_file = tmp_file.name
@@ -172,21 +252,34 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             output_path=output_file
         )
 
-        caption = f"🔊 **សំឡេងខ្មែរ (Edge-TTS)**\n📏 អក្សរ: {len(text)} តួ\n⚡ Speed: {calculated_rate}\n🎶 Pitch: {config['pitch']}"
-        
+        speed_label = {
+            "auto": "Auto",
+            "-20%": "0.8x", "-10%": "0.9x", "+0%": "1.0x",
+            "+20%": "1.2x", "+35%": "1.35x", "+45%": "1.45x", "+60%": "1.6x",
+        }.get(config["speed"], config["speed"])
+
+        caption = (
+            f"🔊 **សំឡេងខ្មែរ (Edge-TTS)**\n"
+            f"📏 អក្សរ: {len(text)} តួ\n"
+            f"⚡ Speed: {calculated_rate} ({speed_label})\n"
+            f"🎶 Pitch: {config['pitch']}"
+        )
+
         with open(output_file, "rb") as audio:
             await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
 
         await status_msg.delete()
-        if os.path.exists(output_file):
-            os.remove(output_file)
 
     except Exception as e:
+        logger.error(f"Error converting text: {e}")
         await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការបំប្លែងសំឡេង៖ {str(e)}")
+    finally:
+        if output_file and os.path.exists(output_file):
+            os.remove(output_file)
 
 
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ដំណើរការការ Upload ឯកសារ .srt ស្គាល់ប្រភេទ Subtitle Timeline"""
+    """ដំណើរការការ Upload ឯកសារ .srt"""
     doc = update.message.document
     if not doc.file_name.lower().endswith(".srt"):
         await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារប្រភេទ `.srt` ប៉ុណ្ណោះ!")
@@ -197,8 +290,12 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
     status_msg = await update.message.reply_text("⏳ កំពុងទាញយក និងអានឯកសារ .SRT...")
 
+    srt_path = None
+    mp3_path = None
+
     try:
         file = await context.bot.get_file(doc.file_id)
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".srt") as tmp_srt:
             srt_path = tmp_srt.name
 
@@ -209,17 +306,31 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
             return
 
+        # ប្រមូលអត្ថបទ និងគណនាពេលវេលាសរុប
         full_text_list = []
-        for sub in subs:
+        total_duration_ms = 0
+
+        for i, sub in enumerate(subs):
             text = sub.text_without_tags.replace("\n", " ").strip()
             if text:
                 full_text_list.append(text)
 
+                # គណនា duration នៃ subtitle នេះ (ms)
+                start_time = sub.start.ordinal  # ពេលវេលាជា milliseconds
+                end_time = sub.end.ordinal
+                duration = end_time - start_time
+                total_duration_ms += duration
+
         full_text = " ".join(full_text_list)
+
+        if not full_text:
+            await status_msg.edit_text("❌ ឯកសារ SRT នេះគ្មានអត្ថបទឡើយ!")
+            return
 
         await status_msg.edit_text("⏳ កំពុងបង្កើតសំឡេងចេញពី SRT...")
 
-        calculated_rate = calculate_speed(full_text, config)
+        # គណនាល្បឿនសម្រាប់ SRT (is_srt=True, មាន duration)
+        calculated_rate = calculate_speed(full_text, config, is_srt=True, srt_duration_ms=total_duration_ms)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_mp3:
             mp3_path = tmp_mp3.name
@@ -232,30 +343,41 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             output_path=mp3_path
         )
 
-        caption = f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n📄 ឯកសារ: `{doc.file_name}`\n⚡ Speed: {calculated_rate}\n🎶 Pitch: {config['pitch']}"
+        # បង្ហាញពេលវេលាជាទំរង់ readable
+        total_sec = total_duration_ms / 1000.0
+        minutes = int(total_sec // 60)
+        seconds = int(total_sec % 60)
+
+        caption = (
+            f"🎬 **បំប្លែងពី SRT រួចរាល់!**\n"
+            f"📄 ឯកសារ: `{doc.file_name}`\n"
+            f"⏱️ រយៈពេល SRT: {minutes}m {seconds}s\n"
+            f"⚡ Speed: {calculated_rate} (Auto-SRT)\n"
+            f"🎶 Pitch: {config['pitch']}"
+        )
 
         with open(mp3_path, "rb") as audio:
             await update.message.reply_audio(audio=audio, caption=caption, parse_mode="Markdown")
 
         await status_msg.delete()
 
-        if os.path.exists(srt_path):
+    except Exception as e:
+        logger.error(f"Error processing SRT: {e}")
+        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
+    finally:
+        if srt_path and os.path.exists(srt_path):
             os.remove(srt_path)
-        if os.path.exists(mp3_path):
+        if mp3_path and os.path.exists(mp3_path):
             os.remove(mp3_path)
 
-    except Exception as e:
-        await status_msg.edit_text(f"❌ មានបញ្ហាក្នុងការដំណើរការឯកសារ SRT៖ {str(e)}")
 
-
-# ==================== WEBHOOK SERVER SETUP ====================
+# ==================== WEBHOOK / POLLING SETUP ====================
 
 async def main():
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+    if not BOT_TOKEN:
         logger.error("❌ សូមដាក់ TELEGRAM BOT TOKEN នៅក្នុង Environment Variable (BOT_TOKEN)!")
         return
 
-    # ១. បង្កើត Telegram Application Setup
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -267,40 +389,29 @@ async def main():
     await app.initialize()
     await app.start()
 
-    # ២. កំណត់ Webhook Path 
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
-
     if WEBHOOK_URL:
-        await app.bot.set_webhook(url=full_webhook_url)
-        logger.info(f"✅ Set Webhook ជោគជ័យទៅកាន់៖ {full_webhook_url}")
+        webhook_path = f"/webhook/{BOT_TOKEN}"
+        full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
+        logger.info(f"✅ Setting Webhook: {full_webhook_url}")
+
+        await app.updater.start_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=webhook_path,
+            webhook_url=full_webhook_url,
+        )
+        logger.info(f"🚀 Bot running on port {PORT} with Webhook")
     else:
-        logger.warning("⚠️ មិនឃើញ RENDER_EXTERNAL_URL ទេ! Webhook អាចនឹងមិនដំណើរការនៅលើ Cloud។")
+        logger.info("🚀 Bot running with Polling (local mode)")
+        await app.updater.start_polling()
 
-    # ៣. បង្កើត Web Server រង់ចាំទទួល HTTP Requests ពី Telegram Webhook
-    async def telegram_webhook_handler(request):
-        """ទទួល Post Data ពី Telegram រួច Feed ចូល Telegram Application"""
-        data = await request.json()
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-        return web.Response(status=200)
-
-    async def health_check_handler(request):
-        return web.Response(text="Bot Webhook Server is Alive!")
-
-    web_app = web.Application()
-    web_app.router.add_post(webhook_path, telegram_webhook_handler)
-    web_app.router.add_get("/", health_check_handler)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    logger.info(f"🚀 Webhook Web Server ត្រូវបានបើកលើ Port: {PORT}")
-    await site.start()
-
-    # រក្សា Server ឱ្យរត់រហូត
+    # រក្សាឱ្យរត់រហូត
     await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+    except RuntimeError:
+        asyncio.run(main())
