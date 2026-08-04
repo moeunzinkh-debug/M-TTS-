@@ -84,8 +84,6 @@ async def tts_to_bytes(text: str, voice: str, rate: str, pitch: str) -> bytes:
     return data
 
 
-# ==================== HANDLERS ====================
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "សូមស្វាគមន៍មកកាន់ **Khmer Text-to-Speech Bot**! 🇰🇭\n\n"
@@ -129,7 +127,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("⚡ 1.6x", callback_data="set_speed_+60%"),
-            InlineKeyboardButton("⚡ 1.8x8x (លឿន)", callback_data="set_speed_+80%"),
+            InlineKeyboardButton("⚡ 1.8x (លឿន)", callback_data="set_speed_+80%"),
         ],
         [
             InlineKeyboardButton("🎶 Pitch: -10Hz", callback_data="set_pitch_-10Hz"),
@@ -278,7 +276,6 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         await status_msg.edit_text(f"⏳ កំពុងបង្កើតសំឡេង {len(chunks)} chunk...")
 
-        # បង្កើតសំឡេងដាច់ដោយឡែកហើយបញ្ចូលក្នុង memory
         combined_audio = AudioSegment.empty()
         for chunk in chunks:
             audio_bytes = await tts_to_bytes(chunk["text"], chunk["voice"], chunk["speed"], config["pitch"])
@@ -286,13 +283,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
                 segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
                 combined_audio += segment
 
-        # រក្សាទុកជា MP3 តែមួយ
         mp3_path = None
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_mp3:
             mp3_path = tmp_mp3.name
         combined_audio.export(mp3_path, format="mp3")
 
-        # បង្ហាញព័ត៌មាន chunk
         chunk_info = []
         for i, chunk in enumerate(chunks[:5]):
             v_name = "ប្រុស" if chunk["voice"] == VOICE_PISETH else "ស្រី"
